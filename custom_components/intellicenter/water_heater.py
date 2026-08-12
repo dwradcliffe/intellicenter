@@ -8,7 +8,7 @@ from homeassistant.components.water_heater import (
     WaterHeaterEntityFeature,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import ATTR_TEMPERATURE, STATE_IDLE, STATE_OFF, STATE_ON
+from homeassistant.const import ATTR_TEMPERATURE, STATE_OFF
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.core import HomeAssistant
 
@@ -103,16 +103,6 @@ class PoolWaterHeater(PoolEntity, WaterHeaterEntity, RestoreEntity):
             state_attributes[self.LAST_HEATER_ATTR] = self._lastHeater
 
         return state_attributes
-
-    @property
-    def state(self) -> str:
-        """Return the current state."""
-        status = self._poolObject[STATUS_ATTR]
-        heater = self._poolObject[HEATER_ATTR]
-        if status == "OFF" or heater == NULL_OBJNAM:
-            return STATE_OFF
-        htmode = self._poolObject[HTMODE_ATTR]
-        return STATE_ON if htmode != "0" else STATE_IDLE
 
     @property
     def unique_id(self):
