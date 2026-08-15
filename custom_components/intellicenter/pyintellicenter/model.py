@@ -219,6 +219,10 @@ class PoolModel:
     def addObjects(self, objList: list):
         """Create or update from all the objects in the list."""
         for elt in objList:
+            # an object without a type cannot be mapped to anything we support
+            if OBJTYP_ATTR not in elt["params"]:
+                _LOGGER.debug(f"ignoring object {elt['objnam']} without {OBJTYP_ATTR}")
+                continue
             self.addObject(elt["objnam"], elt["params"])
 
     def attributesToTrack(self):
