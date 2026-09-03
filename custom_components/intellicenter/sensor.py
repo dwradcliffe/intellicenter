@@ -215,19 +215,26 @@ class PoolSensor(PoolEntity, SensorEntity):
         self._attr_state_class = SensorStateClass.MEASUREMENT
 
     @property
-    def state(self) -> str:
-        """Return the state of the sensor."""
+    def native_value(self):
+        """Return the value of the sensor."""
 
-        value = str(self._poolObject[self._attribute_key])
+        value = self._poolObject[self._attribute_key]
+        if value is None or value == "":
+            return None
+
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
 
         # some sensors, like variable speed pumps, can vary constantly
         # so rounding their value to a nearest multiplier of 'rounding'
         # smoothes the curve and limits the number of updates in the log
 
         if self._rounding_factor:
-            value = str(int(round(int(value) / self._rounding_factor) * self._rounding_factor))
+            return int(round(numeric / self._rounding_factor) * self._rounding_factor)
 
-        return value
+        return int(numeric) if numeric.is_integer() else numeric
 
     @property
     def native_unit_of_measurement(self) -> Optional[str]:

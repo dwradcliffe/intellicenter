@@ -139,15 +139,24 @@ class PoolWaterHeater(PoolEntity, WaterHeaterEntity, RestoreEntity):
         """Return the maximum temperature."""
         return 40.0 if self._controller.systemInfo.usesMetric else 104.0
 
+    def _as_float(self, value):
+        """Parse a Pentair temperature value, or return None if missing."""
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
     @property
     def current_temperature(self):
         """Return the current temperature."""
-        return float(self._poolObject[LSTTMP_ATTR])
+        return self._as_float(self._poolObject[LSTTMP_ATTR])
 
     @property
     def target_temperature(self):
         """Return the temperature we try to reach."""
-        return float(self._poolObject[LOTMP_ATTR])
+        return self._as_float(self._poolObject[LOTMP_ATTR])
 
     def set_temperature(self, **kwargs):
         """Set new target temperatures."""
