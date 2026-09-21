@@ -122,7 +122,7 @@ class PoolWaterHeater(PoolEntity, WaterHeaterEntity, RestoreEntity):
     @property
     def supported_features(self):
         """Return the list of supported features."""
-        return WaterHeaterEntityFeature.TARGET_TEMPERATURE | WaterHeaterEntityFeature.OPERATION_MODE
+        return WaterHeaterEntityFeature.TARGET_TEMPERATURE | WaterHeaterEntityFeature.OPERATION_MODE | WaterHeaterEntityFeature.ON_OFF
 
     @property
     def temperature_unit(self):
@@ -186,6 +186,7 @@ class PoolWaterHeater(PoolEntity, WaterHeaterEntity, RestoreEntity):
             if self._lastHeater != NULL_OBJNAM
             else self._heater_list[0]
         )
+        self.requestChanges({self._attribute_key: self._poolObject.onStatus})
         self.requestChanges({HEATER_ATTR: heater})
 
     async def async_turn_off(self) -> None:
