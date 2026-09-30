@@ -19,8 +19,9 @@ class ICProtocol(asyncio.Protocol):
     - receiving data from the transport and combining it into a proper json object
     - managing a 'only-one-request-out-one-the-wire' policy
     this is more a "works better that way" thand a real requirement as far as know
-    - sending regular (every 10s) 'ping' requests and closing the connection if 'pong'
-    replies are not received fast enough (we allow 2 outstanding which is generous)
+
+    Checking that the connection is still alive is done by the controller
+    (see BaseController._keepAlive).
     """
 
     def __init__(self, controller):
@@ -56,7 +57,16 @@ class ICProtocol(asyncio.Protocol):
     def connection_lost(self, exc):
         """Handle the callback for connection lost."""
 
-        self._controller.connection_lost(exc)
+        if self._controller:
+            self._controller.connection_lost(exc)
+
+    def detach(self):
+        """Stop forwarding anything to the controller.
+
+        Used when the controller abandons this connection, so that late events
+        from it cannot affect a newer connection.
+        """
+        self._controller = None
 
     def data_received(self, data) -> None:
         """Handle the callback for data received."""
@@ -134,6 +144,9 @@ class ICProtocol(asyncio.Protocol):
         """Process a given message from IntelliCenter."""
 
         _LOGGER.debug(f"PROTOCOL: processMessage {message}")
+
+        if not self._controller:
+            return
 
         # if message is 'pong', response for a previous 'ping'
         # do nothing except noting a response was received

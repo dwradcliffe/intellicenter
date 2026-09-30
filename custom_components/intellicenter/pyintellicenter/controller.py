@@ -106,8 +106,21 @@ def prune(obj):
 class BaseController:
     """A basic controller connecting to a Pentair system."""
 
-    def __init__(self, host, port=6681, loop=None):
-        """Initialize the controller."""
+    def __init__(
+        self,
+        host,
+        port=6681,
+        loop=None,
+        keepAliveInterval=60,
+        keepAliveTimeout=30,
+    ):
+        """Initialize the controller.
+
+        keepAliveInterval: seconds between checks that the system still answers
+        (0 or None disables the check)
+        keepAliveTimeout: seconds to wait for that answer before dropping the
+        connection
+        """
         self._host = host
         self._port = port
         self._loop = loop
@@ -118,6 +131,10 @@ class BaseController:
         self._diconnectedCallback = None
 
         self._requests = {}
+
+        self._keepAliveInterval = keepAliveInterval
+        self._keepAliveTimeout = keepAliveTimeout
+        self._keepAliveTask = None
 
     @property
     def host(self) -> str:
@@ -142,28 +159,68 @@ class BaseController:
 
         # we start by requesting a few attributes from the SYSTEM object
         # and therefore validate that the system connected is indeed a IntelliCenter
-        msg = await self.sendCmd(
-            "GetParamList",
-            {
-                "condition": f"{OBJTYP_ATTR}={SYSTEM_TYPE}",
-                "objectList": [
-                    {
-                        "objnam": "INCR",
-                        "keys": SystemInfo.ATTRIBUTES_LIST,
-                    }
-                ],
-            },
-        )
+        msg = await self.sendCmd("GetParamList", self._systemInfoRequest())
 
         info = msg["objectList"][0]
         self._systemInfo = SystemInfo(info["objnam"], info["params"])
 
+        if self._keepAliveInterval and not self._keepAliveTask:
+            self._keepAliveTask = asyncio.create_task(self._keepAlive())
+
+    @staticmethod
+    def _systemInfoRequest() -> dict:
+        """Return the parameters of a request for the SYSTEM object."""
+        return {
+            "condition": f"{OBJTYP_ATTR}={SYSTEM_TYPE}",
+            "objectList": [{"objnam": "INCR", "keys": SystemInfo.ATTRIBUTES_LIST}],
+        }
+
+    async def _keepAlive(self):
+        """Periodically check that the system still answers requests.
+
+        IntelliCenter pushes changes to us, so a quiet connection is normal.
+        But when IntelliCenter loses power or reboots it never closes our
+        socket: the connection just goes silent and, without this check, it
+        stays 'connected' forever while every entity keeps showing stale values.
+        (The original 'ping' heartbeat was removed because firmware 1.064 no
+        longer answers 'ping', so this uses a regular, tiny request instead.)
+        """
+        while self._protocol:
+            await asyncio.sleep(self._keepAliveInterval)
+            if not self._protocol:
+                return
+            try:
+                await asyncio.wait_for(
+                    self.sendCmd("GetParamList", self._systemInfoRequest()),
+                    self._keepAliveTimeout,
+                )
+            except asyncio.TimeoutError:
+                _LOGGER.warning(
+                    f"no answer from {self._host} in {self._keepAliveTimeout}s,"
+                    " dropping the connection"
+                )
+                if self._transport:
+                    # abort (not close): there is no point flushing anything to a
+                    # dead peer, and abort triggers connection_lost right away
+                    self._transport.abort()
+                return
+            except CommandError:
+                # an error response still proves the system is alive
+                pass
+
     def stop(self):
         """Stop all activities from this controller and disconnect."""
+        if self._keepAliveTask:
+            self._keepAliveTask.cancel()
+            self._keepAliveTask = None
         if self._transport:
             for request in self._requests.values():
                 if request is not None:
                     request.cancel()
+            self._requests.clear()
+            # make sure late events from this (now abandoned) connection
+            # cannot interfere with a future connection
+            self._protocol.detach()
             self._transport.close()
             self._transport = None
             self._protocol = None
@@ -184,7 +241,7 @@ class BaseController:
             msg_id = self._protocol.sendCmd(cmd, extra)
             self._requests[msg_id] = future
         elif future:
-            future.setException(Exception("controller disconnected"))
+            future.set_exception(Exception("controller disconnected"))
 
         return future
 
@@ -261,7 +318,10 @@ class BaseController:
         )
 
         if not future == 0:
-            if future:
+            if future and future.done():
+                # the sender stopped waiting (for instance a keep-alive timeout)
+                _LOGGER.debug(f"ignoring late response for msg_id {msg_id}")
+            elif future:
                 if response == "200":
                     future.set_result(msg)
                 else:
@@ -289,9 +349,17 @@ class BaseController:
 class ModelController(BaseController):
     """A controller creating and updating a PoolModel."""
 
-    def __init__(self, host, model, port=6681, loop=None):
+    def __init__(
+        self,
+        host,
+        model,
+        port=6681,
+        loop=None,
+        keepAliveInterval=60,
+        keepAliveTimeout=30,
+    ):
         """Initialize the controller."""
-        super().__init__(host, port, loop)
+        super().__init__(host, port, loop, keepAliveInterval, keepAliveTimeout)
         self._model: PoolModel = model
 
         self._updatedCallback = None
@@ -424,8 +492,20 @@ class ModelController(BaseController):
 class ConnectionHandler:
     """Helper class to recover the connect/disconnect/reconnect cycle of a controller."""
 
-    def __init__(self, controller, timeBetweenReconnects=30):
-        """Initialize the handler."""
+    def __init__(
+        self,
+        controller,
+        timeBetweenReconnects=30,
+        maxTimeBetweenReconnects=300,
+        startTimeout=60,
+    ):
+        """Initialize the handler.
+
+        timeBetweenReconnects: initial delay between reconnection attempts
+        maxTimeBetweenReconnects: cap for the (exponentially growing) delay
+        startTimeout: give up on a connection attempt that takes longer than this
+        (a system that is booting can accept the connection but not answer yet)
+        """
         self._controller = controller
 
         self._starterTask = None
@@ -433,6 +513,8 @@ class ConnectionHandler:
         self._firstTime = True
 
         self._timeBetweenReconnects = timeBetweenReconnects
+        self._maxTimeBetweenReconnects = maxTimeBetweenReconnects
+        self._startTimeout = startTimeout
 
         controller._diconnectedCallback = self._diconnectedCallback
 
@@ -449,12 +531,13 @@ class ConnectionHandler:
         if not self._starterTask:
             self._starterTask = asyncio.create_task(self._starter())
 
-    def _next_delay(self, currentDelay: int) -> int:
+    def _next_delay(self, currentDelay: float) -> float:
         """Compute the delay before the next reconnection attempt.
 
-        default is exponential backoff with a 1.5 factor
+        default is exponential backoff with a 1.5 factor, capped so that a long
+        outage does not push the next attempt hours into the future
         """
-        return int(currentDelay * 1.5)
+        return min(currentDelay * 1.5, self._maxTimeBetweenReconnects)
 
     async def _starter(self, initialDelay=0):
         """Attempt to start the controller."""
@@ -463,11 +546,16 @@ class ConnectionHandler:
         while not started:
             try:
                 if initialDelay:
-                    self.retrying(delay)
+                    self.retrying(initialDelay)
                     await asyncio.sleep(initialDelay)
+                    # only wait that long before the first attempt
+                    initialDelay = 0
                 _LOGGER.debug("trying to start controller")
 
-                await self._controller.start()
+                if self._startTimeout:
+                    await asyncio.wait_for(self._controller.start(), self._startTimeout)
+                else:
+                    await self._controller.start()
 
                 if self._firstTime:
                     self.started(self._controller)
@@ -478,7 +566,9 @@ class ConnectionHandler:
                 started = True
                 self._starterTask = None
             except Exception as err:
-                _LOGGER.error(f"cannot start: {err}")
+                _LOGGER.error(f"cannot start: {err!r}")
+                # don't leave a half-open connection behind before retrying
+                self._controller.stop()
                 self.retrying(delay)
                 await asyncio.sleep(delay)
                 delay = self._next_delay(delay)
