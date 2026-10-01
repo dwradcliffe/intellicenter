@@ -17,6 +17,9 @@ class FakeIntelliCenter:
         """Initialize the fake panel."""
         self.silent = False  # when True, requests are read but never answered
         self.error_after_first = False  # answer later requests with an error code
+        # ... and with another messageID, as the real panel sometimes does
+        self.mismatched_error_ids = False
+        self.response_delay = 0  # seconds to wait before answering each request
         self.connections = 0
         self.requests = 0
         self._server = None
@@ -26,6 +29,17 @@ class FakeIntelliCenter:
         """Start listening on a random local port and return it."""
         self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
         return self._server.sockets[0].getsockname()[1]
+
+    def notify(self):
+        """Push an update to every client, like the panel does on a change."""
+        message = {
+            "command": "NotifyList",
+            "messageID": "notification",
+            "objectList": [{"objnam": "_5451", "params": {"MODE": "ENGLISH"}}],
+        }
+        for writer in self._writers:
+            if not writer.is_closing():
+                writer.write((json.dumps(message) + "\r\n").encode())
 
     async def close(self):
         """Stop the server and drop every connection."""
@@ -54,16 +68,22 @@ class FakeIntelliCenter:
                 self.requests += 1
                 if self.silent:
                     continue
+                if self.response_delay:
+                    await asyncio.sleep(self.response_delay)
                 code = "400" if (self.error_after_first and answered) else "200"
+                msg_id = request["messageID"]
+                if code != "200" and self.mismatched_error_ids:
+                    msg_id = "not-" + msg_id
                 answered += 1
                 reply = {
                     "command": "SendParamList",
-                    "messageID": request["messageID"],
+                    "messageID": msg_id,
                     "response": code,
                     "objectList": [
                         {
                             "objnam": "_5451",
                             "params": {
+                                "OBJTYP": "SYSTEM",
                                 "PROPNAME": "Test Pool",
                                 "VER": "IC: 1.064",
                                 "MODE": "ENGLISH",

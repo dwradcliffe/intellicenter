@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from queue import SimpleQueue
+import time
 
 _LOGGER = logging.getLogger(__name__)
 # _LOGGER.setLevel(logging.DEBUG)
@@ -36,6 +37,12 @@ class ICProtocol(asyncio.Protocol):
 
         # buffer used to accumulate data received before splitting into lines
         self._lineBuffer = ""
+
+        # when (time.monotonic()) the system last answered one of our requests,
+        # whether or not the answer could be matched to its request
+        # (notifications don't count: the system can push updates while our
+        # requests go unanswered)
+        self.lastResponse = None
 
         # state variable and queue for flow control
         # see sendRequest and responseReceived for details
@@ -151,6 +158,7 @@ class ICProtocol(asyncio.Protocol):
         # if message is 'pong', response for a previous 'ping'
         # do nothing except noting a response was received
         if message == "pong":
+            self.lastResponse = time.monotonic()
             self.responseReceived()
             self._num_unacked_pings -= 1
             _LOGGER.debug("ping acknowledged")
@@ -177,6 +185,7 @@ class ICProtocol(asyncio.Protocol):
             # a request (as opposed to a 'notification')
             # if so, we also not that a response was received
             if response:
+                self.lastResponse = time.monotonic()
                 self.responseReceived()
 
             # let's pass our message back to the controller for handling its semantic...

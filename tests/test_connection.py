@@ -96,6 +96,78 @@ def test_error_reply_counts_as_alive():
     assert panel.requests > 3  # keep-alives were actually sent
 
 
+def test_error_reply_with_another_message_id_counts_as_alive():
+    """The panel can answer an error with a messageID that matches nothing.
+
+    The keep-alive then gets no answer of its own, but the panel clearly
+    answered: that must not drop the connection.
+    """
+
+    async def scenario(panel, controller, handler):
+        panel.error_after_first = True
+        panel.mismatched_error_ids = True
+        await handler.start()
+        await asyncio.sleep(1.5)  # several keep-alive rounds
+
+    panel, controller, handler = asyncio.run(_run(scenario))
+    assert handler.events == ["started"]
+    assert panel.connections == 1
+    assert panel.requests > 3  # keep-alives were actually sent
+    assert controller._requests == {}  # abandoned keep-alives aren't kept around
+
+
+def test_updates_alone_dont_keep_an_unanswering_connection():
+    """A connection whose requests go unanswered is dropped, even with updates.
+
+    The panel may keep pushing changes while requests (commands included) get
+    no answer; reconnecting is what gets commands working again.
+    """
+
+    async def scenario(panel, controller, handler):
+        await handler.start()
+        await asyncio.sleep(0.3)
+        panel.silent = True
+        for _ in range(10):
+            panel.notify()
+            await asyncio.sleep(0.1)
+
+    panel, controller, handler = asyncio.run(
+        _run(scenario, timeBetweenReconnects=5)
+    )
+    assert handler.events == ["started", "disconnected"]
+
+
+def test_slow_panel_that_keeps_answering_finishes_starting():
+    """Loading a system takes several requests; a slow panel may need longer
+    than the start timeout in total, and must not be cut off while it answers."""
+
+    async def scenario():
+        panel = FakeIntelliCenter()
+        panel.response_delay = 0.25  # 3 requests to load the model: > 0.5s in total
+        port = await panel.start()
+        controller = ModelController(
+            "127.0.0.1",
+            PoolModel({"SYSTEM": {"MODE"}}),
+            port=port,
+            loop=asyncio.get_running_loop(),
+            keepAliveInterval=0,
+        )
+        handler = RecordingHandler(
+            controller, timeBetweenReconnects=0.2, startTimeout=0.5
+        )
+        try:
+            await handler.start()
+            await asyncio.sleep(2.0)
+        finally:
+            handler.stop()
+            await panel.close()
+        return panel, handler
+
+    panel, handler = asyncio.run(scenario())
+    assert handler.events == ["started"]
+    assert panel.connections == 1
+
+
 def test_start_that_hangs_is_retried():
     """A booting panel can accept the connection but not answer yet."""
 

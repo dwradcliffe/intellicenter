@@ -2,8 +2,10 @@
 
 import asyncio
 from asyncio import Future
+import contextlib
 from hashlib import blake2b
 import logging
+import time
 import traceback
 from typing import Optional
 
@@ -141,6 +143,11 @@ class BaseController:
         """Return the host the controller is connected to."""
         return self._host
 
+    @property
+    def lastResponse(self) -> Optional[float]:
+        """Return when (time.monotonic()) the system last answered a request."""
+        return self._protocol.lastResponse if self._protocol else None
+
     def connection_made(self, protocol, transport):
         """Handle the callback from the protocol."""
         _LOGGER.debug(f"Connection established to {self._host}")
@@ -189,12 +196,19 @@ class BaseController:
             await asyncio.sleep(self._keepAliveInterval)
             if not self._protocol:
                 return
+            sentAt = time.monotonic()
+            request = self.sendCmd("GetParamList", self._systemInfoRequest())
             try:
-                await asyncio.wait_for(
-                    self.sendCmd("GetParamList", self._systemInfoRequest()),
-                    self._keepAliveTimeout,
-                )
+                await asyncio.wait_for(request, self._keepAliveTimeout)
             except asyncio.TimeoutError:
+                self._forget(request)
+                lastResponse = self.lastResponse
+                if lastResponse is not None and lastResponse >= sentAt:
+                    # the system did answer, just not with this request's
+                    # messageID (it does that with some error replies, see
+                    # ICProtocol.processMessage): it is alive
+                    _LOGGER.debug("keep-alive: answer didn't match the request")
+                    continue
                 _LOGGER.warning(
                     f"no answer from {self._host} in {self._keepAliveTimeout}s,"
                     " dropping the connection"
@@ -224,6 +238,12 @@ class BaseController:
             self._transport.close()
             self._transport = None
             self._protocol = None
+
+    def _forget(self, request: Future) -> None:
+        """Stop tracking a request whose answer we no longer wait for."""
+        for msg_id, pending in list(self._requests.items()):
+            if pending is request:
+                del self._requests[msg_id]
 
     def sendCmd(self, cmd, extra=None, waitForResponse=True) -> Optional[Future]:
         """
@@ -503,8 +523,10 @@ class ConnectionHandler:
 
         timeBetweenReconnects: initial delay between reconnection attempts
         maxTimeBetweenReconnects: cap for the (exponentially growing) delay
-        startTimeout: give up on a connection attempt that takes longer than this
-        (a system that is booting can accept the connection but not answer yet)
+        startTimeout: give up on a connection attempt when the system has
+        answered nothing for this long (a system that is booting can accept the
+        connection but not answer yet). Loading a large system takes many
+        requests, so the attempt as a whole can take longer.
         """
         self._controller = controller
 
@@ -552,10 +574,7 @@ class ConnectionHandler:
                     initialDelay = 0
                 _LOGGER.debug("trying to start controller")
 
-                if self._startTimeout:
-                    await asyncio.wait_for(self._controller.start(), self._startTimeout)
-                else:
-                    await self._controller.start()
+                await self._startController()
 
                 if self._firstTime:
                     self.started(self._controller)
@@ -572,6 +591,39 @@ class ConnectionHandler:
                 self.retrying(delay)
                 await asyncio.sleep(delay)
                 delay = self._next_delay(delay)
+
+    async def _startController(self):
+        """Start the controller, giving up if the system stops answering.
+
+        The attempt fails when the system has answered nothing for startTimeout
+        seconds, however long the whole start takes.
+        """
+        if not self._startTimeout:
+            await self._controller.start()
+            return
+
+        task = asyncio.ensure_future(self._controller.start())
+        lastActivity = time.monotonic()
+        try:
+            while True:
+                answered = self._controller.lastResponse
+                if answered is not None and answered > lastActivity:
+                    lastActivity = answered
+                remaining = lastActivity + self._startTimeout - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError(
+                        f"no answer from {self._controller.host}"
+                        f" in {self._startTimeout}s"
+                    )
+                done, _ = await asyncio.wait({task}, timeout=remaining)
+                if done:
+                    task.result()
+                    return
+        finally:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
 
     def stop(self):
         """Stop the handler and the associated controller."""
