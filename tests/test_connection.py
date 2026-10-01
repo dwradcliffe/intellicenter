@@ -165,6 +165,27 @@ def test_send_while_disconnected_fails_cleanly():
     assert asyncio.run(scenario()) == "controller disconnected"
 
 
+def test_late_response_to_abandoned_request_is_ignored():
+    """A response whose sender stopped waiting must not raise InvalidStateError.
+
+    This is what happens when a keep-alive times out (wait_for cancels the
+    future) and the panel's answer shows up afterwards anyway.
+    """
+
+    async def scenario():
+        controller = BaseController("127.0.0.1", loop=asyncio.get_running_loop())
+        for response in ("200", "400"):
+            future = controller._loop.create_future()
+            controller._requests["42"] = future
+            future.cancel()
+            # raised InvalidStateError before the fix
+            controller.receivedMessage("42", "SendParamList", response, {})
+            assert future.cancelled()
+            assert "42" not in controller._requests
+
+    asyncio.run(scenario())
+
+
 def test_model_controller_accepts_keepalive_settings():
     """ModelController passes the keep-alive settings through."""
     controller = ModelController(
