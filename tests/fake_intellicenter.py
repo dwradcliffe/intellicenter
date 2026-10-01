@@ -16,6 +16,7 @@ class FakeIntelliCenter:
     def __init__(self):
         """Initialize the fake panel."""
         self.silent = False  # when True, requests are read but never answered
+        self.drop_connections = 0  # reset this many connections on their 1st request
         self.error_after_first = False  # answer later requests with an error code
         # ... and with another messageID, as the real panel sometimes does
         self.mismatched_error_ids = False
@@ -71,6 +72,11 @@ class FakeIntelliCenter:
                     break  # wait for the rest of the request
                 buffer = buffer[end:].lstrip()
                 self.requests += 1
+                if self.drop_connections:
+                    # like a panel rebooting mid-handshake: reset the connection
+                    self.drop_connections -= 1
+                    writer.transport.abort()
+                    return
                 if self.silent:
                     continue
                 if self.response_delay:

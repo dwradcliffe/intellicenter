@@ -129,6 +129,8 @@ class BaseController:
 
         self._transport = None
         self._protocol = None
+        # known once the system has answered the first request (see start)
+        self._systemInfo = None
 
         self._diconnectedCallback = None
 
@@ -239,9 +241,16 @@ class BaseController:
             self._keepAliveTask.cancel()
             self._keepAliveTask = None
         if self._transport:
+            # fail (rather than cancel) whatever is still waiting for an answer:
+            # a cancellation would look like the *caller* being cancelled and,
+            # during a (re)connection, would end the reconnection loop for good
             for request in self._requests.values():
-                if request is not None:
-                    request.cancel()
+                if request is not None and not request.done():
+                    request.set_exception(
+                        ConnectionError(f"connection to {self._host} closed")
+                    )
+                    # nobody may be left to retrieve it (a cancelled keep-alive)
+                    request.exception()
             self._requests.clear()
             # make sure late events from this (now abandoned) connection
             # cannot interfere with a future connection
@@ -588,14 +597,14 @@ class ConnectionHandler:
 
                 await self._startController()
 
-                if self._firstTime:
-                    self.started(self._controller)
-                    self._firstTime = False
-                else:
-                    self.reconnected(self._controller)
-
                 started = True
                 self._starterTask = None
+
+                if self._firstTime:
+                    self._firstTime = False
+                    self._notify(self.started, self._controller)
+                else:
+                    self._notify(self.reconnected, self._controller)
             except Exception as err:
                 _LOGGER.error(f"cannot start: {err!r}")
                 # don't leave a half-open connection behind before retrying
@@ -662,14 +671,24 @@ class ConnectionHandler:
 
     def _diconnectedCallback(self, controller, err):
         """Handle the disconnection of the underlying controller."""
-        self.disconnected(controller, err)
         if not self._stopped:
             _LOGGER.error(
                 f"system disconnected  from {self._controller.host} {err if err else ''}"
             )
-            self._starterTask = asyncio.create_task(
-                self._starter(self._timeBetweenReconnects)
-            )
+            # a connection dropped while (re)connecting is retried by the
+            # attempt in progress: never run two reconnection loops at once
+            if self._starterTask is None or self._starterTask.done():
+                self._starterTask = asyncio.create_task(
+                    self._starter(self._timeBetweenReconnects)
+                )
+        self._notify(self.disconnected, controller, err)
+
+    def _notify(self, handler, *args):
+        """Invoke a callback without letting it break the reconnection logic."""
+        try:
+            handler(*args)
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.exception(f"error in {handler.__name__} callback")
 
     def started(self, controller):
         """Handle the first time the controller is started.

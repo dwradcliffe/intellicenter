@@ -258,6 +258,74 @@ def test_late_response_to_abandoned_request_is_ignored():
     asyncio.run(scenario())
 
 
+def test_drop_before_the_system_is_identified_is_retried():
+    """A connection reset during the handshake must not end the reconnect loop.
+
+    The handler's disconnected callback reads controller.systemInfo like the
+    Home Assistant one does; it is None until the system has been identified.
+    """
+
+    class StrictHandler(RecordingHandler):
+        def disconnected(self, controller, exc):
+            self.events.append(f"disconnected from {controller.systemInfo.propName}")
+
+    async def scenario():
+        panel = FakeIntelliCenter()
+        panel.drop_connections = 2
+        port = await panel.start()
+        controller = BaseController(
+            "127.0.0.1", port, loop=asyncio.get_running_loop(), keepAliveInterval=0
+        )
+        handler = StrictHandler(controller, timeBetweenReconnects=0.1, startTimeout=1)
+        try:
+            await handler.start()
+            await asyncio.sleep(1.5)
+        finally:
+            handler.stop()
+            await panel.close()
+        return panel, controller, handler
+
+    panel, controller, handler = asyncio.run(scenario())
+    assert handler.events == ["started"]
+    assert panel.connections == 3
+    assert controller.systemInfo.propName == "Test Pool"
+
+
+def test_failing_callback_does_not_stop_reconnection():
+    """An exception in a handler callback must not prevent reconnecting."""
+
+    class FailingHandler(RecordingHandler):
+        def disconnected(self, controller, exc):
+            super().disconnected(controller, exc)
+            raise RuntimeError("boom")
+
+    async def scenario():
+        panel = FakeIntelliCenter()
+        port = await panel.start()
+        controller = BaseController(
+            "127.0.0.1",
+            port,
+            loop=asyncio.get_running_loop(),
+            keepAliveInterval=0.2,
+            keepAliveTimeout=0.2,
+        )
+        handler = FailingHandler(controller, timeBetweenReconnects=0.2, startTimeout=0.5)
+        try:
+            await handler.start()
+            await asyncio.sleep(0.3)
+            panel.silent = True
+            await asyncio.sleep(1.0)
+            panel.silent = False
+            await asyncio.sleep(1.5)
+        finally:
+            handler.stop()
+            await panel.close()
+        return handler
+
+    handler = asyncio.run(scenario())
+    assert handler.events == ["started", "disconnected", "reconnected"]
+
+
 def test_model_controller_accepts_keepalive_settings():
     """ModelController passes the keep-alive settings through."""
     controller = ModelController(

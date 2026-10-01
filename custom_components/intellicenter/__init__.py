@@ -132,10 +132,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         @callback
         def disconnected(self, controller, exc):
-            """Handle updates from the Pentair system."""
-            _LOGGER.info(
-                f"disconnected from system: '{controller.systemInfo.propName}'"
+            """Handle the connection to the Pentair system being lost."""
+            # the system may drop the connection before it is even identified
+            name = (
+                controller.systemInfo.propName
+                if controller.systemInfo
+                else controller.host
             )
+            _LOGGER.info(f"disconnected from system: '{name}'")
             dispatcher.async_dispatcher_send(hass, self.CONNECTION_SIGNAL, False)
 
         @callback
