@@ -1,5 +1,6 @@
 """Pentair IntelliCenter Integration."""
 import asyncio
+from functools import partial
 import logging
 from typing import Any, Optional
 
@@ -305,13 +306,33 @@ class PoolEntity(Entity):
         return attributes
 
     def requestChanges(self, changes: dict) -> None:
-        """Request changes as key:value pairs to the associated Pool object."""
-        # since we don't care about waiting for the response we set waitForResponse to False
-        # whatever changes were requested will be reflected as an update if successful
-        # (also I found out there is no event loop in that thread for a Future would fail)
-        self._controller.requestChanges(
-            self._poolObject.objnam, changes, waitForResponse=False
-        )
+        """Request changes as key:value pairs to the associated Pool object.
+
+        We don't wait for the response: whatever changes were requested will be
+        reflected as an update if successful.
+
+        The connection to the system belongs to the event loop and asyncio
+        transports are not thread safe, so a request made from any other thread
+        is handed over to the loop instead of being written from that thread.
+        """
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:  # not in an event loop at all
+            running_loop = None
+
+        if self.hass is None or running_loop is self.hass.loop:
+            self._controller.requestChanges(
+                self._poolObject.objnam, changes, waitForResponse=False
+            )
+        else:
+            self.hass.loop.call_soon_threadsafe(
+                partial(
+                    self._controller.requestChanges,
+                    self._poolObject.objnam,
+                    changes,
+                    waitForResponse=False,
+                )
+            )
 
     def isUpdated(self, updates: dict[str, dict[str, str]]) -> bool:
         """Return true if the entity is updated by the updates from Intellicenter."""
