@@ -9,7 +9,11 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONCENTRATION_PARTS_PER_MILLION, UnitOfPower
+from homeassistant.const import (
+    CONCENTRATION_PARTS_PER_MILLION,
+    UnitOfElectricPotential,
+    UnitOfPower,
+)
 from homeassistant.core import HomeAssistant
 
 from . import PoolEntity
@@ -129,6 +133,7 @@ async def async_setup_entry(
                             controller,
                             obj,
                             device_class=None,
+                            unit_of_measurement="pH",
                             attribute_key=PHVAL_ATTR,
                             name="+ (pH)",
                         )
@@ -140,6 +145,7 @@ async def async_setup_entry(
                             controller,
                             obj,
                             device_class=None,
+                            unit_of_measurement=UnitOfElectricPotential.MILLIVOLT,
                             attribute_key=ORPVAL_ATTR,
                             name="+ (ORP)",
                         )
