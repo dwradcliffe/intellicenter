@@ -178,7 +178,10 @@ class BaseController:
         """
 
         _LOGGER.debug(f"CONTROLLER: sendCmd: {cmd} {extra} {waitForResponse}")
-        future = Future() if waitForResponse else None
+        future = None
+        if waitForResponse:
+            loop = self._loop or asyncio.get_running_loop()
+            future = loop.create_future()
 
         if self._protocol:
             msg_id = self._protocol.sendCmd(cmd, extra)

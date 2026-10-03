@@ -107,15 +107,16 @@ class ICProtocol(asyncio.Protocol):
         # so we throttle back to one request on the wire at a time
         # see responseReceived() for the other side of the flow control
 
-        if self._out_pending == 0:
-            # nothing is progress, we can transmit the packet
+        # count the new request as pending before it reaches the wire, so the
+        # accounting is already right whenever its response is processed
+        self._out_pending += 1
+
+        if self._out_pending == 1:
+            # nothing else in progress, we can transmit the packet
             self._writeToTransport(request)
         else:
             # there is already something on the wire, let's queue the request
             self._out_queue.put(request)
-
-        # and count the new request as pending
-        self._out_pending += 1
 
     def responseReceived(self) -> None:
         """Handle the flow control part of a received rsponse."""
