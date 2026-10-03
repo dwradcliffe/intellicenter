@@ -9,8 +9,17 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONCENTRATION_PARTS_PER_MILLION, UnitOfPower
+from homeassistant.const import UnitOfPower
 from homeassistant.core import HomeAssistant
+
+try:
+    from homeassistant.const import UnitOfRatio
+
+    PARTS_PER_MILLION = UnitOfRatio.PARTS_PER_MILLION
+except ImportError:  # older Home Assistant releases without UnitOfRatio
+    from homeassistant.const import (
+        CONCENTRATION_PARTS_PER_MILLION as PARTS_PER_MILLION,
+    )
 
 from . import PoolEntity
 from .const import CONST_GPM, CONST_RPM, DOMAIN
@@ -185,7 +194,7 @@ async def async_setup_entry(
                             controller,
                             obj,
                             device_class=None,
-                            unit_of_measurement=CONCENTRATION_PARTS_PER_MILLION,
+                            unit_of_measurement=PARTS_PER_MILLION,
                             attribute_key=SALT_ATTR,
                             name="+ (Salt)",
                         )
