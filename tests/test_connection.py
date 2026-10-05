@@ -265,3 +265,149 @@ def test_model_controller_accepts_keepalive_settings():
     )
     assert controller._keepAliveInterval == 10
     assert controller._keepAliveTimeout == 5
+
+
+def test_keepalive_waits_for_the_start_to_finish():
+    """The keep-alive must not cut off a slow start that is still answering.
+
+    Only one request is on the wire at a time: a keep-alive sent during the
+    start waits behind the start's requests and could time out although the
+    panel answers each of them within the start timeout.
+    """
+
+    async def scenario():
+        panel = FakeIntelliCenter()
+        panel.response_delay = 0.5  # 3 requests to load the model: 1.5s in all
+        port = await panel.start()
+        controller = ModelController(
+            "127.0.0.1",
+            PoolModel({"SYSTEM": {"MODE"}}),
+            port=port,
+            loop=asyncio.get_running_loop(),
+            keepAliveInterval=0.6,
+            keepAliveTimeout=0.3,
+        )
+        handler = RecordingHandler(
+            controller, timeBetweenReconnects=0.2, startTimeout=0.7
+        )
+        try:
+            await handler.start()
+            await asyncio.sleep(1.8)
+            assert handler.events == ["started"]
+            panel.response_delay = 0  # loaded: answers come quickly again
+            await asyncio.sleep(1.5)  # keep-alive rounds
+        finally:
+            handler.stop()
+            await panel.close()
+        return panel, handler
+
+    panel, handler = asyncio.run(scenario())
+    assert handler.events == ["started"]
+    assert panel.connections == 1
+    assert panel.requests > 4  # keep-alives were sent once started
+
+
+def test_stop_while_connecting_leaves_no_connection_behind():
+    """Stopping while the connection is being made must close that connection.
+
+    Here the stop comes when the TCP connection is up but the start hasn't
+    resumed yet (unloading Home Assistant's integration at that moment).
+    """
+
+    async def scenario():
+        panel = FakeIntelliCenter()
+        port = await panel.start()
+        loop = asyncio.get_running_loop()
+
+        class StoppingController(BaseController):
+            def connection_made(self, protocol, transport):
+                super().connection_made(protocol, transport)
+                loop.call_soon(handler.stop)
+
+        controller = StoppingController(
+            "127.0.0.1", port, loop=loop, keepAliveInterval=0
+        )
+        handler = RecordingHandler(
+            controller, timeBetweenReconnects=0.2, startTimeout=0.5
+        )
+        try:
+            await handler.start()
+            await asyncio.sleep(0.5)
+            # (before the clean-up below, which would close it anyway)
+            leftover = controller._transport
+            disconnects = panel.disconnects
+        finally:
+            handler.stop()
+            await panel.close()
+        return panel, handler, leftover, disconnects
+
+    panel, handler, leftover, disconnects = asyncio.run(scenario())
+    assert "started" not in handler.events
+    assert leftover is None
+    assert panel.connections == 1
+    assert disconnects == 1
+    assert panel.requests == 0
+
+
+def test_stop_while_an_attempt_is_abandoned_ends_the_reconnection():
+    """A stop() that comes while a timed-out start is cleaned up isn't lost.
+
+    Nothing may reconnect after it.
+    """
+
+    async def scenario():
+        panel = FakeIntelliCenter()
+        panel.silent = True  # the start times out
+        port = await panel.start()
+        loop = asyncio.get_running_loop()
+
+        class StopWhenAbandoned(BaseController):
+            async def start(self):
+                try:
+                    await super().start()
+                except asyncio.CancelledError:
+                    # the attempt timed out: stop while it cleans up
+                    loop.call_soon(handler.stop)
+                    raise
+
+        controller = StopWhenAbandoned(
+            "127.0.0.1", port, loop=loop, keepAliveInterval=0
+        )
+        handler = RecordingHandler(
+            controller, timeBetweenReconnects=0.1, startTimeout=0.3
+        )
+        try:
+            await handler.start()
+            await asyncio.sleep(0.5)  # timed out and stopped
+            panel.silent = False
+            await asyncio.sleep(0.8)  # long enough to reconnect
+            connections = panel.connections
+            leftover = controller._transport
+        finally:
+            handler.stop()
+            await panel.close()
+        return handler, connections, leftover
+
+    handler, connections, leftover = asyncio.run(scenario())
+    assert handler.events == []
+    assert connections == 1
+    assert leftover is None
+
+
+def test_abandoned_start_closes_its_connection():
+    """An attempt cancelled while waiting for an answer closes its connection.
+
+    (Cancelled from outside here, not by stop(), which closes it anyway.)
+    """
+
+    async def scenario(panel, controller, handler):
+        panel.silent = True
+        await handler.start()
+        await asyncio.sleep(0.2)  # connected, waiting for the first answer
+        assert controller._transport is not None
+        handler._starterTask.cancel()
+        await asyncio.sleep(0.2)
+        assert controller._transport is None
+        assert panel.disconnects == 1
+
+    asyncio.run(_run(scenario))

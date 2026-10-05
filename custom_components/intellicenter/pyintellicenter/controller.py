@@ -159,6 +159,17 @@ class BaseController:
             self._diconnectedCallback(self, exc)
 
     async def start(self) -> None:
+        """Connect to the Pentair system and load what the controller needs."""
+        await self._connect()
+        await self._load()
+        # only now: one request is on the wire at a time, so a keep-alive sent
+        # during the start would wait behind the start's requests and could
+        # time out although the system answers them (ConnectionHandler watches
+        # over the start itself)
+        if self._keepAliveInterval and not self._keepAliveTask:
+            self._keepAliveTask = asyncio.create_task(self._keepAlive())
+
+    async def _connect(self) -> None:
         """Connect to the Pentair system and retrieves some system information."""
         self._transport, self._protocol = await self._loop.create_connection(
             lambda: ICProtocol(self), self._host, self._port
@@ -171,8 +182,8 @@ class BaseController:
         info = msg["objectList"][0]
         self._systemInfo = SystemInfo(info["objnam"], info["params"])
 
-        if self._keepAliveInterval and not self._keepAliveTask:
-            self._keepAliveTask = asyncio.create_task(self._keepAlive())
+    async def _load(self) -> None:
+        """Load what the controller needs once connected (see start)."""
 
     @staticmethod
     def _systemInfoRequest() -> dict:
@@ -389,10 +400,8 @@ class ModelController(BaseController):
         """Return the model this controller manages."""
         return self._model
 
-    async def start(self):
-        """Start the controller, fetch and start monitoring the model."""
-        await super().start()
-
+    async def _load(self):
+        """Fetch the model and start monitoring it."""
         # now we retrieve all the objects type, subtype, sname and parent
         allObjects = await self.getAllObjects(
             [OBJTYP_ATTR, SUBTYP_ATTR, SNAME_ATTR, PARENT_ATTR]
@@ -526,11 +535,14 @@ class ConnectionHandler:
         startTimeout: give up on a connection attempt when the system has
         answered nothing for this long (a system that is booting can accept the
         connection but not answer yet). Loading a large system takes many
-        requests, so the attempt as a whole can take longer.
+        requests, so the attempt as a whole can take longer. 0 or None: no
+        limit (nothing watches the start; the keep-alive starts after it).
         """
         self._controller = controller
 
         self._starterTask = None
+        # the controller's start() in progress (see _startController)
+        self._startTask = None
         self._stopped = False
         self._firstTime = True
 
@@ -603,6 +615,7 @@ class ConnectionHandler:
             return
 
         task = asyncio.ensure_future(self._controller.start())
+        self._startTask = task
         lastActivity = time.monotonic()
         try:
             while True:
@@ -620,10 +633,19 @@ class ConnectionHandler:
                     task.result()
                     return
         finally:
+            if self._startTask is task:
+                self._startTask = None
             if not task.done():
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
+                # an abandoned start may have connected before it saw the
+                # cancellation: don't leave that connection open
+                self._controller.stop()
+                if asyncio.current_task().cancelling():
+                    # this attempt was cancelled (stop()) while it waited for
+                    # the start to end: don't lose that, or it would go on
+                    raise asyncio.CancelledError
 
     def stop(self):
         """Stop the handler and the associated controller."""
@@ -632,6 +654,10 @@ class ConnectionHandler:
         if self._starterTask:
             self._starterTask.cancel()
             self._starterTask = None
+        if self._startTask:
+            # cancel the start itself too: the task waiting for it only sees
+            # its cancellation later, and the start could connect meanwhile
+            self._startTask.cancel()
         self._controller.stop()
 
     def _diconnectedCallback(self, controller, err):

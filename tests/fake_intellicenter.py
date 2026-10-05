@@ -21,6 +21,7 @@ class FakeIntelliCenter:
         self.mismatched_error_ids = False
         self.response_delay = 0  # seconds to wait before answering each request
         self.connections = 0
+        self.disconnects = 0  # connections the client closed
         self.requests = 0
         self._server = None
         self._writers = []
@@ -55,8 +56,12 @@ class FakeIntelliCenter:
         buffer = ""
         answered = 0
         while True:
-            data = await reader.read(4096)
+            try:
+                data = await reader.read(4096)
+            except ConnectionResetError:
+                data = b""
             if not data:
+                self.disconnects += 1
                 return
             buffer += data.decode()
             while buffer:
