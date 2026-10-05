@@ -21,6 +21,9 @@ class FakeIntelliCenter:
         # ... and with another messageID, as the real panel sometimes does
         self.mismatched_error_ids = False
         self.response_delay = 0  # seconds to wait before answering each request
+        # close the connection right after sending this many answers on it
+        # (once: later connections are left open)
+        self.close_after_answers = 0
         self.connections = 0
         self.disconnects = 0  # connections the client closed
         self.requests = 0
@@ -104,4 +107,9 @@ class FakeIntelliCenter:
                     ],
                 }
                 writer.write((json.dumps(reply) + "\r\n").encode())
+                if self.close_after_answers and answered == self.close_after_answers:
+                    # the answer and the end of the connection arrive together
+                    self.close_after_answers = 0
+                    writer.close()
+                    return
                 await writer.drain()

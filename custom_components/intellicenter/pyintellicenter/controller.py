@@ -146,6 +146,11 @@ class BaseController:
         return self._host
 
     @property
+    def connected(self) -> bool:
+        """Return True while there is a connection to the system."""
+        return self._transport is not None
+
+    @property
     def lastResponse(self) -> Optional[float]:
         """Return when (time.monotonic()) the system last answered a request."""
         return self._protocol.lastResponse if self._protocol else None
@@ -596,6 +601,15 @@ class ConnectionHandler:
                 _LOGGER.debug("trying to start controller")
 
                 await self._startController()
+
+                if not self._controller.connected:
+                    # the system closed the connection right after answering
+                    # the start's last request: the disconnection came while
+                    # this attempt was in progress, which left it to this
+                    # attempt (see _diconnectedCallback)
+                    raise ConnectionError(
+                        f"connection to {self._controller.host} lost while starting"
+                    )
 
                 started = True
                 self._starterTask = None

@@ -479,3 +479,34 @@ def test_abandoned_start_closes_its_connection():
         assert panel.disconnects == 1
 
     asyncio.run(_run(scenario))
+
+
+def test_drop_right_after_the_start_is_retried():
+    """A connection closed right after the start's last answer is reconnected.
+
+    The start can complete before the disconnection is reported; the
+    disconnection then comes while the attempt is still in progress, which
+    leaves it to that attempt: the attempt must not report success.
+    """
+
+    async def scenario():
+        panel = FakeIntelliCenter()
+        panel.close_after_answers = 1  # the answer that identifies the system
+        port = await panel.start()
+        controller = BaseController(
+            "127.0.0.1", port, loop=asyncio.get_running_loop(), keepAliveInterval=0
+        )
+        handler = RecordingHandler(controller, timeBetweenReconnects=0.1, startTimeout=1)
+        try:
+            await handler.start()
+            await asyncio.sleep(1.0)
+            connected = controller.connected
+        finally:
+            handler.stop()
+            await panel.close()
+        return panel, handler, connected
+
+    panel, handler, connected = asyncio.run(scenario())
+    assert handler.events == ["disconnected", "started"]
+    assert panel.connections == 2
+    assert connected
