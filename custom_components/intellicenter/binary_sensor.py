@@ -2,20 +2,22 @@
 
 import logging
 
-from custom_components.intellicenter.pyintellicenter.attributes import (
-    BODY_ATTR,
-    CIRCUIT_TYPE,
-    HEATER_TYPE,
-)
-from custom_components.intellicenter.water_heater import HEATER_ATTR, HTMODE_ATTR
-
 from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from . import PoolEntity
 from .const import DOMAIN
-from .pyintellicenter import STATUS_ATTR, ModelController, PoolObject
+from .pyintellicenter import (
+    BODY_ATTR,
+    CIRCUIT_TYPE,
+    HEATER_ATTR,
+    HEATER_TYPE,
+    HTMODE_ATTR,
+    STATUS_ATTR,
+    ModelController,
+    PoolObject,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
