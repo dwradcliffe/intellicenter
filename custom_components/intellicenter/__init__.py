@@ -14,7 +14,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, EVENT_HOMEASSISTANT_STOP, UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
-from homeassistant.helpers import config_validation as cv, dispatcher
+from homeassistant.helpers import config_validation as cv, dispatcher, entity_registry as er
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.typing import ConfigType
 
@@ -78,9 +78,30 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return True
 
 
+async def async_migrate_entity_unique_ids(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Migrate entity unique IDs from config entry id to system unique id."""
+    new_prefix = entry.unique_id
+    if not new_prefix or new_prefix == entry.entry_id:
+        return
+
+    old_prefix = entry.entry_id
+
+    @callback
+    def update_unique_id(entity_entry: er.RegistryEntry) -> dict[str, str] | None:
+        unique_id = entity_entry.unique_id
+        if unique_id.startswith(old_prefix):
+            return {"new_unique_id": new_prefix + unique_id[len(old_prefix) :]}
+        return None
+
+    await er.async_migrate_entries(hass, entry.entry_id, update_unique_id)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up IntelliCenter integration from a config entry."""
 
+    await async_migrate_entity_unique_ids(hass, entry)
     attributes_map = {
         BODY_TYPE: {
             SNAME_ATTR,
@@ -215,6 +236,7 @@ class PoolEntity(Entity):
     ):
         """Initialize a Pool entity."""
         self._entry_id = entry.entry_id
+        self._unique_id_prefix = entry.unique_id or entry.entry_id
         self._controller = controller
         self._poolObject = poolObject
         self._attr_available = True
@@ -264,7 +286,7 @@ class PoolEntity(Entity):
     @property
     def unique_id(self):
         """Return a unique ID."""
-        my_id = self._entry_id + self._poolObject.objnam
+        my_id = self._unique_id_prefix + self._poolObject.objnam
         if self._attribute_key != STATUS_ATTR:
             my_id += self._attribute_key
         return my_id
