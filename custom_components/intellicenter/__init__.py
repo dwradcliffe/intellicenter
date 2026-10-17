@@ -1,5 +1,4 @@
 """Pentair IntelliCenter Integration."""
-import asyncio
 import logging
 from typing import Any, Optional
 
@@ -11,7 +10,7 @@ from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
 from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
 from homeassistant.components.water_heater import DOMAIN as WATER_HEATER_DOMAIN
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST, EVENT_HOMEASSISTANT_STOP, UnitOfTemperature
+from homeassistant.const import CONF_HOST, UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv, dispatcher
@@ -154,14 +153,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         hass.data[DOMAIN][entry.entry_id] = handler
 
-        # subscribe to Home Assistant STOP event to do some cleanup
-
-        async def on_hass_stop(event):
-            """Stop push updates when hass stops."""
-            handler.stop()
-
-        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, on_hass_stop)
-
         return True
     except ConnectionRefusedError as err:
         raise ConfigEntryNotReady from err
@@ -170,18 +161,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload IntelliCenter config entry."""
 
-    # Unload entities for this entry/device.
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
-    all(
-        await asyncio.gather(
-            *[
-                hass.config_entries.async_forward_entry_unload(entry, platform)
-                for platform in PLATFORMS
-            ]
-        )
-    )
-
-    # Cleanup
     handler = hass.data[DOMAIN].pop(entry.entry_id, None)
 
     _LOGGER.info(f"unloading integration {entry.entry_id}")
@@ -192,7 +173,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not hass.data[DOMAIN]:
         del hass.data[DOMAIN]
 
-    return True
+    return unload_ok
 
 
 # -------------------------------------------------------------------------------------
