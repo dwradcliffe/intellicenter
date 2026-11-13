@@ -90,9 +90,15 @@ class PoolNumber(PoolEntity, NumberEntity):
         self._attr_icon = "mdi:gauge"
 
     @property
-    def native_value(self) -> float:
+    def native_value(self) -> float | None:
         """Return the current value."""
-        return self._poolObject[self._attribute_key]
+        value = self._poolObject[self._attribute_key]
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     def set_native_value(self, value: float) -> None:
         """Update the current value."""
