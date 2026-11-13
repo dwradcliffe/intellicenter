@@ -88,6 +88,11 @@ class SystemInfo:
 # -------------------------------------------------------------------------------------
 
 
+# attributes which identify an object rather than describe it:
+# they must survive pruning even when the system reports them as undefined
+PRESERVED_ATTRIBUTES = {OBJTYP_ATTR}
+
+
 def prune(obj):
     """Cleanup a full object tree from undefined parameters."""
 
@@ -97,7 +102,7 @@ def prune(obj):
     elif type(obj) is dict:
         result = {}
         for (key, value) in obj.items():
-            if key != value:
+            if key != value or key in PRESERVED_ATTRIBUTES:
                 result[key] = prune(value)
         return result
     return obj
