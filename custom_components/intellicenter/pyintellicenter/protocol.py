@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from queue import SimpleQueue
+import time
 
 _LOGGER = logging.getLogger(__name__)
 # _LOGGER.setLevel(logging.DEBUG)
@@ -19,8 +20,9 @@ class ICProtocol(asyncio.Protocol):
     - receiving data from the transport and combining it into a proper json object
     - managing a 'only-one-request-out-one-the-wire' policy
     this is more a "works better that way" thand a real requirement as far as know
-    - sending regular (every 10s) 'ping' requests and closing the connection if 'pong'
-    replies are not received fast enough (we allow 2 outstanding which is generous)
+
+    Checking that the connection is still alive is done by the controller
+    (see BaseController._keepAlive).
     """
 
     def __init__(self, controller):
@@ -35,6 +37,12 @@ class ICProtocol(asyncio.Protocol):
 
         # buffer used to accumulate data received before splitting into lines
         self._lineBuffer = ""
+
+        # when (time.monotonic()) the system last answered one of our requests,
+        # whether or not the answer could be matched to its request
+        # (notifications don't count: the system can push updates while our
+        # requests go unanswered)
+        self.lastResponse = None
 
         # state variable and queue for flow control
         # see sendRequest and responseReceived for details
@@ -56,7 +64,16 @@ class ICProtocol(asyncio.Protocol):
     def connection_lost(self, exc):
         """Handle the callback for connection lost."""
 
-        self._controller.connection_lost(exc)
+        if self._controller:
+            self._controller.connection_lost(exc)
+
+    def detach(self):
+        """Stop forwarding anything to the controller.
+
+        Used when the controller abandons this connection, so that late events
+        from it cannot affect a newer connection.
+        """
+        self._controller = None
 
     def data_received(self, data) -> None:
         """Handle the callback for data received."""
@@ -135,9 +152,13 @@ class ICProtocol(asyncio.Protocol):
 
         _LOGGER.debug(f"PROTOCOL: processMessage {message}")
 
+        if not self._controller:
+            return
+
         # if message is 'pong', response for a previous 'ping'
         # do nothing except noting a response was received
         if message == "pong":
+            self.lastResponse = time.monotonic()
             self.responseReceived()
             self._num_unacked_pings -= 1
             _LOGGER.debug("ping acknowledged")
@@ -164,6 +185,7 @@ class ICProtocol(asyncio.Protocol):
             # a request (as opposed to a 'notification')
             # if so, we also not that a response was received
             if response:
+                self.lastResponse = time.monotonic()
                 self.responseReceived()
 
             # let's pass our message back to the controller for handling its semantic...
