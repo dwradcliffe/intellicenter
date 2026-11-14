@@ -1,6 +1,7 @@
 """Protocol for communicating with a Pentair system."""
 
 import asyncio
+import codecs
 import json
 import logging
 from queue import SimpleQueue
@@ -35,6 +36,8 @@ class ICProtocol(asyncio.Protocol):
 
         # buffer used to accumulate data received before splitting into lines
         self._lineBuffer = ""
+        # a multi-byte UTF-8 character can be split across two TCP segments
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
         # state variable and queue for flow control
         # see sendRequest and responseReceived for details
@@ -61,25 +64,18 @@ class ICProtocol(asyncio.Protocol):
     def data_received(self, data) -> None:
         """Handle the callback for data received."""
 
-        data = data.decode()
+        data = self._decoder.decode(data)
         _LOGGER.debug(f"PROTOCOL: received from transport: {data}")
 
-        # "packets" from Pentair are organized by lines
-        # so wait until at least a full line is received
-        self._lineBuffer += data
-
-        if not self._lineBuffer.endswith("\r\n"):
-            return
-
-        # there might have been more than one "packet" in our current buffer
-        # so let's split them
-
-        lines = str.split(self._lineBuffer, "\r\n")
-        self._lineBuffer = ""
+        # "packets" from Pentair are organized by lines: process every complete
+        # line as soon as it arrives and keep a trailing partial one for later.
+        # (A chunk can end in the middle of a message: waiting for the whole
+        # buffer to end with a line break held back the complete messages in
+        # front of it, including responses the flow control was waiting for.)
+        *lines, self._lineBuffer = (self._lineBuffer + data).split("\r\n")
 
         for line in lines:
             if line:
-                # and process each line individually
                 self.processMessage(line)
 
     def sendCmd(self, cmd: str, extra: dict = None) -> str:
